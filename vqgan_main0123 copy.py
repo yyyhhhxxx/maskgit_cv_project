@@ -64,8 +64,7 @@ class VQGANSolver:
                                      train=True,
                                      download=True,
                                      transform=transform)
-            dataset, val_dataset = torch.utils.data.random_split(dataset, [10000, 40000])
-
+                                              
         elif flag == 'test':
             dataset = datasets.CIFAR100('cifar100',
                                      train=False,
@@ -92,10 +91,8 @@ class VQGANSolver:
 
     def config_optimizer(self):
         OptimizerClass = getattr(torch.optim, self.FLAGS.optimizer.type)
-        self.optimizer_G = OptimizerClass(self.model.vqvae.parameters(), lr = self.FLAGS.optimizer.vqvae.lr)
-        self.optimizer_D = OptimizerClass(self.model.discriminator.parameters(), lr = self.FLAGS.optimizer.D.lr)
-        # self.optimizer_G = OptimizerClass(self.model.vqvae.parameters(), lr = self.FLAGS.optimizer.vqvae.lr, weight_decay=self.FLAGS.optimizer.weight_decay)
-        # self.optimizer_D = OptimizerClass(self.model.discriminator.parameters(), lr = self.FLAGS.optimizer.D.lr, weight_decay=self.FLAGS.optimizer.weight_decay)
+        self.optimizer_G = OptimizerClass(self.model.vqvae.parameters(), lr = self.FLAGS.optimizer.vqvae.lr, weight_decay=self.FLAGS.optimizer.weight_decay)
+        self.optimizer_D = OptimizerClass(self.model.discriminator.parameters(), lr = self.FLAGS.optimizer.D.lr, weight_decay=self.FLAGS.optimizer.weight_decay)
 
     def config_scheduler(self):
         SchedulerClass = getattr(torch.optim.lr_scheduler, self.FLAGS.scheduler.type)
@@ -124,6 +121,9 @@ class VQGANSolver:
         for epoch in range(self.FLAGS.max_epoch):
             print(f"Epoch [{epoch}/{self.FLAGS.max_epoch}]")
             with tqdm(range(len(self.train_loader))) as pbar:
+
+                # self.scheduler_G.step()
+                # self.scheduler_D.step()
                 for i, (image_data, _) in zip(pbar, self.train_loader): # 1000
                     # read data
                     image_data = image_data.to(self.device)
@@ -131,65 +131,48 @@ class VQGANSolver:
                     x_hat, vq_loss, _ = self.model.vqvae(image_data)
                     
                     Real = self.model.discriminator(image_data)
-                    Fake = self.model.discriminator(x_hat.detach())
+                    Fake = self.model.discriminator(x_hat)
 
                     disc_factor = self.model.adopt_weight(self.FLAGS.disc_factor, epoch * steps_one_epoch + i, threshold=self.FLAGS.disc_start)
-                    # compute D-loss
-                    # D_loss = -torch.mean(torch.log(Real + 1e-12) + torch.log(1 - Fake + 1e-12))
-                    D_loss = -torch.mean(Real) + torch.mean(Fake)
-                    D_loss = disc_factor * D_loss
-                    # Optimize Discriminator
-                    for _ in range(3):
-                        self.optimizer_D.zero_grad()
-                        D_loss.backward(retain_graph=True)
-                        self.optimizer_D.step()
-
-                    for p in self.model.discriminator.parameters():
-                        p.data.clamp_(-0.01,0.01)
-                    """
-                    上面加detach会好。
-                    用了lpips就会让D_loss到0
-                    wgan:去掉D的sigmoid，不取log，RMSprop，clip D参数
-                    小数据集
-                    """
-                    # compute G-loss
                     perceptual_loss = self.perceptual_loss(image_data, x_hat)
-                    rec_loss = F.mse_loss(x_hat, image_data)
-                    # nll_loss = self.FLAGS.perceptual_loss_factor * perceptual_loss.mean() + self.FLAGS.l2_loss_factor * rec_loss
-                    nll_loss = rec_loss
+                    rec_loss = F.mse_loss(x_hat, image_data) # torch.abs(image_data - x_hat)
+                    nll_loss = self.FLAGS.perceptual_loss_factor * perceptual_loss.mean() + self.FLAGS.l2_loss_factor * rec_loss
+                    # nll_losss = nll_loss.mean()
+                    g_loss = -torch.mean(Fake)
 
-                    # disloss = -torch.mean(torch.log(Fake + 1e-12))
-                    disloss = -torch.mean(Fake)
-                    # lamda = self.model.vqvae.calculate_lambda(nll_loss, disloss)
-                    lamda = 0.2
-                    G_loss = nll_loss + vq_loss + disc_factor * lamda * disloss
+                    lamda = self.model.vqvae.calculate_lambda(nll_loss, g_loss)
+                    loss_vq = nll_loss + vq_loss + disc_factor * lamda * g_loss
+
+                    loss_gan = disc_factor * 0.5 * (torch.mean(F.relu(1.0-Real)) + torch.mean(F.relu(1.0+Fake)))
 
                     self.optimizer_G.zero_grad()
-                    G_loss.backward()
-                    self.optimizer_G.step()
+                    loss_vq.backward(retain_graph=True)
 
-                    self.logger.add_scalar("Loss/VQ loss", np.round(G_loss.cpu().detach().numpy().item(), 5), (epoch * steps_one_epoch) + i)
+                    self.optimizer_D.zero_grad()
+                    loss_gan.backward()
+
+                    self.optimizer_G.step()
+                    self.optimizer_D.step()
+
+                    self.logger.add_scalar("Loss/VQ loss", np.round(loss_vq.cpu().detach().numpy().item(), 5), (epoch * steps_one_epoch) + i)
                     self.logger.add_scalar("Loss/Q loss", np.round(vq_loss.cpu().detach().numpy().item(), 5), (epoch * steps_one_epoch) + i)
                     self.logger.add_scalar("Loss/perceptual loss", np.round(perceptual_loss.cpu().detach().numpy().mean(), 5), (epoch * steps_one_epoch) + i)
                     self.logger.add_scalar("Loss/rec loss", np.round(rec_loss.cpu().detach().numpy().item(), 5), (epoch * steps_one_epoch) + i)
-                    self.logger.add_scalar("Loss/dis loss", np.round(disloss.cpu().detach().numpy().item(), 5), (epoch * steps_one_epoch) + i)
 
-                    self.logger.add_scalar("Loss/GAN loss", np.round(D_loss.cpu().detach().numpy().item(), 5), (epoch * steps_one_epoch) + i)
+                    self.logger.add_scalar("Loss/GAN loss", np.round(loss_gan.cpu().detach().numpy().item(), 3), (epoch * steps_one_epoch) + i)
                     self.logger.add_scalar("LR/lr", self.optimizer_G.state_dict()['param_groups'][0]['lr'], (epoch * steps_one_epoch) + i)
+                    # self.logger.add_scalar("disc_factor", disc_factor, (epoch * steps_one_epoch) + i)
 
-                    # if i % 500 == 499:
-                    if i % 200 == 199:
+                    if i % 500 == 499:
                         with torch.no_grad():
                             both = torch.cat((image_data[:4], x_hat.add(1).mul(0.5)[:4]))
                             vutils.save_image(both, os.path.join(self.FLAGS.logdir, f"{epoch}_{i}.jpg"), nrow=4)
 
-                    pbar.set_postfix(VQ_Loss=np.round(G_loss.cpu().detach().numpy().item(), 5),
-                                     GAN_Loss=np.round(D_loss.cpu().detach().numpy().item(), 5))
+                    pbar.set_postfix(VQ_Loss=np.round(loss_vq.cpu().detach().numpy().item(), 5),
+                                     GAN_Loss=np.round(loss_gan.cpu().detach().numpy().item(), 3))
                     pbar.update(0)
                 
-                self.scheduler_G.step()
-                self.scheduler_D.step()
-                if epoch % 5 == 4:
+                if epoch % 2 == 1:
                     torch.save(self.model.vqvae.state_dict(), os.path.join(self.FLAGS.logdir, f"vqgan_epoch_{epoch}.pt"))
 
 

@@ -2,8 +2,8 @@
 device: 0
 
 # log
-logdir: output/vqgan_lr
-max_epoch: 10
+logdir: output/vqgan_lr1
+max_epoch: 100
 
 # train, test, evaluate
 run: train
@@ -55,12 +55,13 @@ loader:
 # optimizer
 optimizer:
 
-  type: AdamW
+  type: RMSprop
+  # type: AdamW
   weight_decay: 0.01
   vqvae:
-    lr: 2.25e-05
+    lr: 0.00025
   D:
-    lr: 2.25e-05
+    lr: 0.00025 # 2.25e-05
 
 # scheuler
 scheduler:
@@ -73,7 +74,7 @@ scheduler:
     gamma: 0.8
     step_size: 1
   
-disc_factor: 1.0
-disc_start: 0
-perceptual_loss_factor: 1.0
-l2_loss_factor: 1.0
+disc_factor: 0.2
+disc_start: 2000
+perceptual_loss_factor: 0.1
+l2_loss_factor: 0.9

@@ -1,5 +1,9 @@
 /MNIST/
 /cifar100/
+/cifar10/
+/image/
+/output/
+*.pth
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
